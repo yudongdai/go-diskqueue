@@ -58,48 +58,49 @@ type diskQueue struct {
 	// 64bit atomic vars need to be first for proper alignment on 32bit platforms
 
 	// run-time state (also persisted to disk)
-	readPos      int64
-	writePos     int64
-	readFileNum  int64
-	writeFileNum int64
-	depth        int64
+	readPos      int64 // 读offset
+	writePos     int64 // 写offset
+	readFileNum  int64 // 当前读文件编号
+	writeFileNum int64 // 当前写文件编号
+	depth        int64 // 队列长度
 
 	sync.RWMutex
 
 	// instantiation time metadata
-	name            string
-	dataPath        string
-	maxBytesPerFile int64 // currently this cannot change once created
-	minMsgSize      int32
-	maxMsgSize      int32
-	syncEvery       int64         // number of writes per fsync
-	syncTimeout     time.Duration // duration of time per fsync
-	exitFlag        int32
-	needSync        bool
+	name            string        // 落地文件的前缀
+	dataPath        string        // 路径
+	maxBytesPerFile int64         // currently this cannot change once created 落地文件的大小
+	minMsgSize      int32		  // 消息最小大小
+	maxMsgSize      int32         // 消息最大大小
+	syncEvery       int64         // number of writes per fsync 写多少次刷盘一次
+	syncTimeout     time.Duration // duration of time per fsync 多久刷盘一次
+	exitFlag        int32         // 退出标记
+	needSync        bool          // 是否需要fsnc
 
 	// keeps track of the position where we have read
 	// (but not yet sent over readChan)
-	nextReadPos     int64
-	nextReadFileNum int64
+	nextReadPos     int64 // 下一次读的位置
+	nextReadFileNum int64 // 下一次读的文件编号
 
-	readFile  *os.File
-	writeFile *os.File
-	reader    *bufio.Reader
-	writeBuf  bytes.Buffer
+	readFile  *os.File      // 读fd
+	writeFile *os.File      // 写fd
+	reader    *bufio.Reader // 读buffer
+	writeBuf  bytes.Buffer  // 写buffer
 
 	// exposed via ReadChan()
-	readChan chan []byte
+	readChan chan []byte // 读chan
 
 	// internal channels
-	depthChan         chan int64
-	writeChan         chan []byte
-	writeResponseChan chan error
-	emptyChan         chan int
-	emptyResponseChan chan error
-	exitChan          chan int
-	exitSyncChan      chan int
+	depthChan chan int64 // 
 
-	logf AppLogFunc
+	writeChan         chan []byte // 写chan
+	writeResponseChan chan error  // 写结果响应chan
+	emptyChan         chan int    // 清空chan
+	emptyResponseChan chan error  // 清空结果chan
+	exitChan          chan int    // 退出chan
+	exitSyncChan      chan int 	  // 退出同步chan
+
+	logf AppLogFunc //
 }
 
 // New instantiates an instance of diskQueue, retrieving metadata
@@ -153,17 +154,19 @@ func (d *diskQueue) ReadChan() <-chan []byte {
 
 // Put writes a []byte to the queue
 func (d *diskQueue) Put(data []byte) error {
+	// 保护exitFlag
 	d.RLock()
 	defer d.RUnlock()
 
 	if d.exitFlag == 1 {
-		return errors.New("exiting")
+		return errors.New("exiting"A)
 	}
 
 	d.writeChan <- data
-	return <-d.writeResponseChan
+	return <-d.writeResponseChan //阻塞，等待写入结果
 }
 
+// 关闭，持久化数据
 // Close cleans up the queue and persists metadata
 func (d *diskQueue) Close() error {
 	err := d.exit(false)
@@ -173,10 +176,12 @@ func (d *diskQueue) Close() error {
 	return d.sync()
 }
 
+// 删除
 func (d *diskQueue) Delete() error {
 	return d.exit(true)
 }
 
+// 退出
 func (d *diskQueue) exit(deleted bool) error {
 	d.Lock()
 	defer d.Unlock()
@@ -225,8 +230,10 @@ func (d *diskQueue) Empty() error {
 }
 
 func (d *diskQueue) deleteAllFiles() error {
+	// 删除数据文件
 	err := d.skipToNextRWFile()
-
+	
+	// 删除索引文件
 	innerErr := os.Remove(d.metaDataFileName())
 	if innerErr != nil && !os.IsNotExist(innerErr) {
 		d.logf(ERROR, "DISKQUEUE(%s) failed to remove metadata file - %s", d.name, innerErr)
@@ -236,6 +243,7 @@ func (d *diskQueue) deleteAllFiles() error {
 	return err
 }
 
+// 删除数据文件
 func (d *diskQueue) skipToNextRWFile() error {
 	var err error
 
@@ -248,7 +256,8 @@ func (d *diskQueue) skipToNextRWFile() error {
 		d.writeFile.Close()
 		d.writeFile = nil
 	}
-
+	
+	// 已读文件不会超过已写文件
 	for i := d.readFileNum; i <= d.writeFileNum; i++ {
 		fn := d.fileName(i)
 		innerErr := os.Remove(fn)
@@ -295,7 +304,8 @@ func (d *diskQueue) readOne() ([]byte, error) {
 
 		d.reader = bufio.NewReader(d.readFile)
 	}
-
+	
+	// 先读出消息的大小
 	err = binary.Read(d.reader, binary.BigEndian, &msgSize)
 	if err != nil {
 		d.readFile.Close()
@@ -373,7 +383,7 @@ func (d *diskQueue) writeOne(data []byte) error {
 	}
 
 	d.writeBuf.Reset()
-	err = binary.Write(&d.writeBuf, binary.BigEndian, dataLen)
+	err = binary.Write(&d.writeBuf, binary.BigEndian, dataLen) // todo
 	if err != nil {
 		return err
 	}
@@ -414,6 +424,7 @@ func (d *diskQueue) writeOne(data []byte) error {
 	return err
 }
 
+// fsync消息文件和索引文件
 // sync fsyncs the current writeFile and persists metadata
 func (d *diskQueue) sync() error {
 	if d.writeFile != nil {
@@ -461,6 +472,7 @@ func (d *diskQueue) retrieveMetaData() error {
 	return nil
 }
 
+// 持久化元数据
 // persistMetaData atomically writes state to the filesystem
 func (d *diskQueue) persistMetaData() error {
 	var f *os.File
@@ -490,10 +502,12 @@ func (d *diskQueue) persistMetaData() error {
 	return os.Rename(tmpFileName, fileName)
 }
 
+// 元数据文件名
 func (d *diskQueue) metaDataFileName() string {
 	return fmt.Sprintf(path.Join(d.dataPath, "%s.diskqueue.meta.dat"), d.name)
 }
 
+// 消息数据文件名
 func (d *diskQueue) fileName(fileNum int64) string {
 	return fmt.Sprintf(path.Join(d.dataPath, "%s.diskqueue.%06d.dat"), d.name, fileNum)
 }
@@ -538,6 +552,7 @@ func (d *diskQueue) checkTailCorruption(depth int64) {
 	}
 }
 
+// 消息塞到队列后，变更偏移量
 func (d *diskQueue) moveForward() {
 	oldReadFileNum := d.readFileNum
 	d.readFileNum = d.nextReadFileNum
